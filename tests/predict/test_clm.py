@@ -168,6 +168,39 @@ class TestCLMWithDummyLM:
         assert "OVER budget" not in result.final_context
         assert "[context: ~" in result.final_context
 
+    def test_reminders_fire_once_per_level_and_rearm_after_compaction(self):
+        clm = CLM("query -> answer", context_budget=1000)
+        run = clm._start_run()
+        readouts = []
+        for size in [100, 300, 320, 600, 950, 960, 100, 300]:
+            run.context = ContextFile(text="x" * (size * 4))
+            readouts.append(clm._readout(run))
+        assert "Reminder" not in readouts[0]
+        assert "Reminder" in readouts[1]
+        assert "Reminder" not in readouts[2]
+        assert "Reminder" in readouts[3]
+        assert "URGENT" in readouts[4] and "URGENT" in readouts[5]
+        assert "Reminder" not in readouts[6]
+        assert "Reminder" in readouts[7]
+
+    def test_shrink_gate_rejects_any_growth(self):
+        lm = DummyLM([
+            {"reasoning": "Look", "code": "print('a' * 400)"},
+            {"reasoning": "Grow a little", "code": "with open(CONTEXT_FILE, 'a') as f: f.write('note ' * 50)"},
+            {"reasoning": "Done", "code": "SUBMIT(4)"},
+        ])
+        clm = CLM("query -> answer: int", max_iters=5, context_budget=5000, edit_gate="shrink")
+        with dspy.context(lm=lm):
+            result = clm(query="q")
+        assert result.context_stats["edits_rejected"] == 1
+        assert "SHRINK" in result.trajectory[1]["context_edit"]
+
+    def test_custom_context_instructions(self):
+        clm = CLM("query -> answer", context_budget=777, context_instructions="Keep a scratchpad. Budget {context_budget}.")
+        instructions = clm.generate_action.signature.instructions
+        assert instructions.endswith("Keep a scratchpad. Budget 777.")
+        assert "Managing your live context" not in instructions
+
     @pytest.mark.asyncio
     async def test_aforward(self):
         lm = DummyLM([

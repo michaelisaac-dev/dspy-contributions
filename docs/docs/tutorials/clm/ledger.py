@@ -12,7 +12,7 @@ Four programs, same model, same tools, same step limit:
 - CLM            dspy.CLM with no budget: same as RLM except it can rewrite its live context through CONTEXT_FILE
 - CLM @ budget   dspy.CLM held to the budget
 
-Run:  python docs/docs/tutorials/clm_ledger/clm_vs_rlm.py --model anthropic/claude-haiku-4-5-20251001
+Run:  python docs/docs/tutorials/clm/ledger.py --model anthropic/claude-haiku-4-5-20251001
 """
 
 from __future__ import annotations
@@ -24,10 +24,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+from baselines import run_program
+
 import dspy
-from dspy.predict.clm import ContextMeter, approx_tokens
+from dspy.predict.clm import approx_tokens
 from dspy.primitives.prediction import Prediction
-from dspy.primitives.repl_types import REPLHistory
 
 NAMES = ["Avery", "Blake", "Casey", "Devon", "Emery", "Finley", "Harper", "Jordan", "Kendall", "Logan", "Morgan", "Quinn"]
 WORDS = {5: "five", 10: "ten", 15: "fifteen", 20: "twenty", 25: "twenty-five", 30: "thirty", 40: "forty", 50: "fifty"}
@@ -157,67 +158,6 @@ class Ledger(dspy.Signature):
 
 
 # =============================================================================
-# Programs
-# =============================================================================
-
-
-class BudgetedRLM(dspy.RLM):
-    """Stock RLM held to a token budget on its history, with CLM's overflow rule.
-
-    RLM cannot remove anything from its history, so the only change is the stop rule: a run whose
-    history stays over budget for two consecutive steps ends and answers from the newest steps that fit.
-    """
-
-    def __init__(self, *args, context_budget: int, **kwargs):
-        self.context_budget = context_budget
-        super().__init__(*args, **kwargs)
-
-    def forward(self, **input_args) -> Prediction:
-        self._validate_inputs(input_args)
-        output_field_names = list(self.signature.output_fields)
-        variables = self._build_variables(**input_args)
-        meter, warned = ContextMeter(), False
-        with self._interpreter_context(self._prepare_execution_tools(), None) as repl:
-            regular_args = self._prepare_serializable_vars(input_args, repl)
-            history = REPLHistory(max_output_chars=self.max_output_chars)
-            for iteration in range(self.max_iters):
-                text = history.format() if history else ""
-                if approx_tokens(text) > self.context_budget:
-                    if warned:
-                        break
-                    warned = True
-                meter.observe(text)
-                result = self._execute_iteration(repl, variables, history, iteration, regular_args, output_field_names)
-                if isinstance(result, Prediction):
-                    result.context_stats = {**meter.as_dict(), "context_overflow": False}
-                    return result
-                history = result
-            overflow = approx_tokens(history.format()) > self.context_budget
-            while len(history.entries) > 1 and approx_tokens(history.format()) > self.context_budget:
-                history = REPLHistory(entries=history.entries[1:], max_output_chars=self.max_output_chars)
-            prediction = self._extract_fallback(variables, history, output_field_names)
-            prediction.context_stats = {**meter.as_dict(), "context_overflow": overflow}
-            return prediction
-
-
-def run_rlm(ep: Episode, max_iters: int, budget: int | None) -> Prediction:
-    if budget is None:
-        # Stock RLM: meter its history from the trajectory afterwards (it is append-only, so this is exact).
-        pred = dspy.RLM(Ledger, max_iters=max_iters, tools=[ep.next_batch])(task=TASK)
-        meter, history = ContextMeter(), REPLHistory()
-        for entry in pred.trajectory:
-            meter.observe(history.format() if history else "")
-            history = history.append(**entry)
-        pred.context_stats = {**meter.as_dict(), "context_overflow": False}
-        return pred
-    return BudgetedRLM(Ledger, max_iters=max_iters, tools=[ep.next_batch], context_budget=budget)(task=TASK)
-
-
-def run_clm(ep: Episode, max_iters: int, budget: int | None) -> Prediction:
-    return dspy.CLM(Ledger, max_iters=max_iters, tools=[ep.next_batch], context_budget=budget)(task=TASK)
-
-
-# =============================================================================
 # Evaluation
 # =============================================================================
 
@@ -234,14 +174,7 @@ def run_one(method: str, seed: int, args) -> dict:
     ep = make_episode(seed)
     t0 = time.time()
     try:
-        if method == "RLM":
-            pred = run_rlm(ep, args.max_iters, None)
-        elif method == "RLM @ budget":
-            pred = run_rlm(ep, args.max_iters, args.budget)
-        elif method == "CLM":
-            pred = run_clm(ep, args.max_iters, None)
-        else:
-            pred = run_clm(ep, args.max_iters, args.budget)
+        pred = run_program(method, Ledger, [ep.next_batch], args.max_iters, args.budget, task=TASK)
         error = None
     except Exception as e:  # keep the sweep going; a crash scores zero
         pred, error = None, f"{type(e).__name__}: {e}"

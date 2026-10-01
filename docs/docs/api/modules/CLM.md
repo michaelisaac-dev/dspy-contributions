@@ -40,8 +40,9 @@ Each step:
 1. **Meter.** If the live context is over `context_budget`, a warning turn is added. If it is still over budget at the next step, the run ends and the extract predictor answers from the newest turns that fit.
 2. **Mirror.** The live context is written to `CONTEXT_FILE` inside the sandbox.
 3. **Act.** The LM sees the instructions, the input metadata, and its live context, then writes code. That code can call tools and `llm_query`, and can rewrite `CONTEXT_FILE`.
-4. **Read back.** If the file changed, it replaces the live context, with turn headers renumbered. An edit that grows the context past the budget is rejected. The step's code and output are then appended as `[[CTX_TURN i role=assistant]]` and `[[CTX_TURN i role=tool]]` blocks, followed by a `[context: ~N/B tokens]` readout.
-5. **Free edits.** A step that only edits the context and prints nothing does not count against `max_iters`. These steps are capped by `max_edit_turns`.
+4. **Read back.** If the file changed, it replaces the live context, with turn headers renumbered. With `edit_gate="fit"` (the default), an edit that grows the context past the budget is rejected; with `edit_gate="shrink"`, every edit that grows it is rejected. The step's code and output are then appended as `[[CTX_TURN i role=assistant]]` and `[[CTX_TURN i role=tool]]` blocks, followed by a `[context: ~N/B tokens]` readout.
+5. **Reminders.** As in the paper's harness, a one-time reminder appears when the context first crosses 25%, 50% and 75% of the budget, re-armed after a compaction. Above 90%, an urgent reminder appears on every step.
+6. **Free edits.** A step that only edits the context and prints nothing does not count against `max_iters`. These steps are capped by `max_edit_turns`.
 
 Because the context is a single text field that DSPy renders fresh on every call, reading an edit back takes nothing more than replacing that text. No chat-message reconstruction is needed.
 
@@ -49,9 +50,15 @@ Because the context is a single text field that DSPy renders fresh on every call
 
 `context_stats["prefill_tokens_with_prefix_reuse"]` estimates what a prefix-caching server would prefill. On each call, it counts the managed context from the first character that differs from the previous call's context. Appending is cheap, and an edit near the top forces the whole tail to be re-read. This follows the paper's *prefix-reuse FLOPs*, restricted to the managed context. Token counts are approximate (~4 characters per token).
 
+### Steering and customization
+
+- `context_budget=None` drops the limit: the LM still gets size readouts and may edit, but nothing is enforced. In our runs, models rarely compact without a budget to stay under.
+- `context_instructions="..."` replaces the built-in context-management instructions, for example with a skill document that prescribes a strategy (the paper's Section 4.2). `{context_budget}` is filled in.
+- Subclasses can override `_reminder`, `_urgent_reminder`, and `_context_path`. The tutorials use these to run CLM with the paper's own prompt and reminder wording, loaded from a local clone of its repo.
+
 ## Example: CLM vs. RLM on a streamed ledger
 
-[`tutorials/clm_ledger`](https://github.com/stanfordnlp/dspy/tree/main/docs/docs/tutorials/clm_ledger) has a small ContextBench-style demo. A ledger arrives batch by batch through a tool, mixed with distractors written in natural language, and the agent must report final balances. It compares stock `RLM`, `RLM` held to the same budget, and `CLM`.
+[`tutorials/clm`](https://github.com/stanfordnlp/dspy/tree/main/docs/docs/tutorials/clm) has a small ContextBench-style demo. A ledger arrives batch by batch through a tool, mixed with distractors written in natural language, and the agent must report final balances. It compares stock `RLM`, `RLM` held to the same budget, and `CLM`.
 
 ## Output
 

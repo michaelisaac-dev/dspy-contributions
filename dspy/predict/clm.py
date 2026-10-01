@@ -20,7 +20,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 import pydantic
 
@@ -203,6 +203,7 @@ class _Run:
     edits_applied: int = 0
     edits_rejected: int = 0
     over_budget_warned: bool = False
+    reminders_fired: set[float] = field(default_factory=set)
     overflowed: bool = False
     log: list[dict[str, Any]] = field(default_factory=list)
 
@@ -237,6 +238,9 @@ class CLM(RLM):
     """
 
     _RESERVED_SANDBOX_NAMES = RLM._RESERVED_SANDBOX_NAMES | {"CONTEXT_FILE"}
+    # Budget fractions that trigger a one-time reminder, and the level above which every step gets an urgent one.
+    REMINDER_LEVELS = (0.25, 0.5, 0.75)
+    URGENT_REMINDER_LEVEL = 0.9
     _RESERVED_RESULT_NAMES = RLM._RESERVED_RESULT_NAMES | {"final_context", "context_stats"}
 
     def __init__(
@@ -245,6 +249,8 @@ class CLM(RLM):
         max_iters: int = 20,
         context_budget: int | None = 8_000,
         max_edit_turns: int | None = None,
+        context_instructions: str | None = None,
+        edit_gate: Literal["fit", "shrink"] = "fit",
         max_llm_calls: int = 50,
         max_output_chars: int = 10_000,
         verbose: bool = False,
@@ -260,10 +266,18 @@ class CLM(RLM):
                 still sees size readouts and may edit, but nothing is enforced). The instructions and
                 input metadata sit outside it, like a pinned system prompt.
             max_edit_turns: Cap on free edit-only steps. Defaults to ``max_iters``.
+            context_instructions: Replaces the built-in context-management instructions, e.g. to steer the
+                strategy with a skill document. ``{context_budget}`` is filled in.
+            edit_gate: ``"fit"`` accepts an edit that grows the context while it stays within budget;
+                ``"shrink"`` rejects every edit that grows it.
             max_llm_calls, max_output_chars, verbose, tools, sub_lm, interpreter_factory: As for RLM.
         """
         self.context_budget = context_budget
         self.max_edit_turns = max_iters if max_edit_turns is None else max_edit_turns
+        if edit_gate not in ("fit", "shrink"):
+            raise ValueError(f"edit_gate must be 'fit' or 'shrink', not {edit_gate!r}")
+        self.edit_gate = edit_gate
+        self.context_instructions = context_instructions
         super().__init__(
             signature,
             max_iters=max_iters,
@@ -283,10 +297,14 @@ class CLM(RLM):
         """RLM's signatures with the append-only history swapped for the editable live context."""
         action_sig, extract_sig = super()._build_signatures()
         context_field = dspy.InputField(desc="Your live context, which you manage through CONTEXT_FILE")
-        budget_rule = _NO_BUDGET_RULE if self.context_budget is None else _BUDGET_RULE.replace(
-            "{context_budget}", str(self.context_budget)
-        )
-        instructions = action_sig.instructions + CONTEXT_INSTRUCTIONS_TEMPLATE.replace("{budget_rule}", budget_rule)
+        if self.context_instructions is not None:
+            context_section = "\n\n" + self.context_instructions.replace("{context_budget}", str(self.context_budget))
+        else:
+            budget_rule = _NO_BUDGET_RULE if self.context_budget is None else _BUDGET_RULE.replace(
+                "{context_budget}", str(self.context_budget)
+            )
+            context_section = CONTEXT_INSTRUCTIONS_TEMPLATE.replace("{budget_rule}", budget_rule)
+        instructions = action_sig.instructions + context_section
         action_sig = (
             action_sig.delete("repl_history")
             .insert(1, "live_context", context_field, type_=ContextFile)
@@ -303,8 +321,12 @@ class CLM(RLM):
     # One step
     # =========================================================================
 
+    def _context_path(self) -> str:
+        """Where the live context is mirrored in the sandbox. Unique per run, for interpreters that share a disk."""
+        return f"/tmp/.live_ctx/{uuid.uuid4().hex[:12]}/LIVE_CTX_MAIN.txt"
+
     def _start_run(self) -> _Run:
-        return _Run(path=f"/tmp/.live_ctx/{uuid.uuid4().hex[:12]}/LIVE_CTX_MAIN.txt")
+        return _Run(path=self._context_path())
 
     def _before_action(self, run: _Run) -> bool:
         """Meter the context the LM is about to see. Returns False when the run must end on overflow."""
@@ -350,7 +372,8 @@ class CLM(RLM):
     def _reconcile(self, run: _Run, written: str, edited: str | None, code: str) -> tuple[str, bool]:
         """Adopt the model's edit of the context file. Returns (receipt, edit_applied)."""
         if edited is None or edited.strip() == written.strip():
-            if "CONTEXT_FILE" in code and "write" in code:
+            names_file = "CONTEXT_FILE" in code or run.path.rsplit("/", 1)[-1] in code
+            if names_file and "write" in code:
                 return (
                     f"[CONTEXT_FILE: NO change - your edit matched nothing; context is still ~{run.context.tokens} tokens. "
                     "Match text you have seen, or target turn headers like `[[CTX_TURN 4 role=tool]]`.]"
@@ -358,11 +381,15 @@ class CLM(RLM):
             return "", False
 
         before, after = run.context.tokens, approx_tokens(edited)
-        if self.context_budget is not None and after > before and after > self.context_budget:
+        over_budget = self.context_budget is not None and after > self.context_budget
+        if after > before and (self.edit_gate == "shrink" or over_budget):
             run.edits_rejected += 1
+            rule = "an edit must SHRINK the context" if self.edit_gate == "shrink" else (
+                f"an edit must fit the {self.context_budget}-token budget"
+            )
             return (
-                f"[CONTEXT_FILE: edit REJECTED - it grew the context ~{before}->{after} tokens, past the "
-                f"{self.context_budget}-token budget. Replace stale text with a SHORTER summary.]"
+                f"[CONTEXT_FILE: edit REJECTED - it grew the context ~{before}->{after} tokens, and {rule}. "
+                "Replace stale text with a SHORTER summary.]"
             ), False
 
         run.context = run.context.replaced(edited)
@@ -373,12 +400,33 @@ class CLM(RLM):
         tokens = run.context.tokens
         if self.context_budget is None:
             return f"[context: ~{tokens} tokens]"
-        readout = f"[context: ~{tokens}/{self.context_budget} tokens"
-        if tokens > self.context_budget:
-            readout += " - OVER budget: compact CONTEXT_FILE now"
-        elif tokens > 0.8 * self.context_budget:
-            readout += " - nearly full: compact CONTEXT_FILE soon"
-        return readout + "]"
+        readout = f"[context: ~{tokens}/{self.context_budget} tokens]"
+        fraction = tokens / self.context_budget
+        # A compaction re-arms the reminders for the levels it dropped back below.
+        run.reminders_fired = {level for level in run.reminders_fired if fraction >= level}
+        if fraction > 1:
+            return readout + "\n[OVER budget: compact CONTEXT_FILE on your next step, or the run ends.]"
+        if fraction >= self.URGENT_REMINDER_LEVEL:
+            return f"{readout}\n{self._urgent_reminder(tokens)}"
+        crossed = [level for level in self.REMINDER_LEVELS if fraction >= level and level not in run.reminders_fired]
+        if crossed:
+            run.reminders_fired.update(crossed)
+            readout += f"\n{self._reminder(max(crossed), tokens)}"
+        return readout
+
+    def _reminder(self, level: float, tokens: int) -> str:
+        """One-time reminder when the context first crosses ``level`` of the budget."""
+        return (
+            f"[Reminder: your live context is at {round(100 * tokens / self.context_budget)}% of its budget. Compact "
+            "stale turns into a short note when it is worth it; one larger compaction beats many small ones.]"
+        )
+
+    def _urgent_reminder(self, tokens: int) -> str:
+        """Reminder shown on every step once the context is above ``URGENT_REMINDER_LEVEL`` of the budget."""
+        return (
+            f"[URGENT: only ~{self.context_budget - tokens} tokens of room left, which may not fit another output. "
+            "Compact CONTEXT_FILE now.]"
+        )
 
     def _run_action(
         self,
