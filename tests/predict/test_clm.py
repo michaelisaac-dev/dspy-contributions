@@ -66,6 +66,11 @@ class TestCLMSignatures:
         assert "CONTEXT_FILE" in instructions
         assert "1234 tokens" in instructions
 
+    def test_no_budget_instructions(self):
+        instructions = CLM("query -> answer", context_budget=None).generate_action.signature.instructions
+        assert "no hard limit" in instructions
+        assert "the run ends" not in instructions
+
     def test_context_file_name_is_reserved(self):
         with pytest.raises(ValueError, match="conflict"):
             CLM("CONTEXT_FILE -> answer")
@@ -148,6 +153,20 @@ class TestCLMWithDummyLM:
         assert result.answer == 2
         assert result.context_stats["edits_rejected"] == 1
         assert "zzzz" not in result.final_context
+
+    def test_no_budget_never_overflows(self):
+        lm = DummyLM([
+            {"reasoning": "Flood the context", "code": "print('y' * 40000)"},
+            {"reasoning": "Keep going", "code": "print('still here')"},
+            {"reasoning": "Done", "code": "SUBMIT(3)"},
+        ])
+        clm = CLM("query -> answer: int", max_iters=5, context_budget=None)
+        with dspy.context(lm=lm):
+            result = clm(query="q")
+        assert result.answer == 3
+        assert result.context_stats["context_overflow"] is False
+        assert "OVER budget" not in result.final_context
+        assert "[context: ~" in result.final_context
 
     @pytest.mark.asyncio
     async def test_aforward(self):

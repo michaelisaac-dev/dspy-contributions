@@ -5,11 +5,12 @@ A ContextBench-style task (Shao et al., 2026): the input arrives as a stream the
 distractors written in loose natural language: planned payments, declined requests, net-zero exchanges,
 and corrections that cancel a payment from an earlier batch. The last batch asks for some final balances.
 
-Three programs, same model, same tools, same step limit:
+Four programs, same model, same tools, same step limit:
 
 - RLM            stock dspy.RLM; its history only grows and has no budget
 - RLM @ budget   dspy.RLM held to the CLM's token budget (overflow ends the run, as for CLM)
-- CLM @ budget   dspy.CLM, which can rewrite its own live context through CONTEXT_FILE
+- CLM            dspy.CLM with no budget: same as RLM except it can rewrite its live context through CONTEXT_FILE
+- CLM @ budget   dspy.CLM held to the budget
 
 Run:  python docs/docs/tutorials/clm_ledger/clm_vs_rlm.py --model anthropic/claude-haiku-4-5-20251001
 """
@@ -212,7 +213,7 @@ def run_rlm(ep: Episode, max_iters: int, budget: int | None) -> Prediction:
     return BudgetedRLM(Ledger, max_iters=max_iters, tools=[ep.next_batch], context_budget=budget)(task=TASK)
 
 
-def run_clm(ep: Episode, max_iters: int, budget: int) -> Prediction:
+def run_clm(ep: Episode, max_iters: int, budget: int | None) -> Prediction:
     return dspy.CLM(Ledger, max_iters=max_iters, tools=[ep.next_batch], context_budget=budget)(task=TASK)
 
 
@@ -237,6 +238,8 @@ def run_one(method: str, seed: int, args) -> dict:
             pred = run_rlm(ep, args.max_iters, None)
         elif method == "RLM @ budget":
             pred = run_rlm(ep, args.max_iters, args.budget)
+        elif method == "CLM":
+            pred = run_clm(ep, args.max_iters, None)
         else:
             pred = run_clm(ep, args.max_iters, args.budget)
         error = None
@@ -273,7 +276,7 @@ def main():
     parser.add_argument("--budget", type=int, default=2000, help="live-context budget in ~tokens (4 chars/token)")
     parser.add_argument("--max-iters", type=int, default=30)
     parser.add_argument("--threads", type=int, default=6)
-    parser.add_argument("--methods", default="RLM,RLM @ budget,CLM @ budget")
+    parser.add_argument("--methods", default="RLM,CLM,RLM @ budget,CLM @ budget")
     parser.add_argument("--out", default=None, help="write per-run JSON results here")
     args = parser.parse_args()
 

@@ -17,11 +17,12 @@ or reasoning is counted.
 
 ## Programs
 
-All three use the same model, tool, signature, and `max_iters=30`:
+All four use the same model, tool, signature, and `max_iters=30`:
 
 | program | context |
 |---|---|
 | `RLM` | stock `dspy.RLM`; history is append-only, no budget |
+| `CLM` | `dspy.CLM(context_budget=None)`; identical to `RLM` except the LM can rewrite its live context (size readouts, no limit) |
 | `RLM @ budget` | stock `dspy.RLM` loop, held to the 2,000-token budget with CLM's overflow rule |
 | `CLM @ budget` | `dspy.CLM(context_budget=2000)`; the LM may rewrite its live context through `CONTEXT_FILE` |
 
@@ -43,6 +44,7 @@ python docs/docs/tutorials/clm_ledger/clm_vs_rlm.py --model anthropic/claude-hai
 | program | accuracy | all 3 correct | read whole stream | overflowed | peak context | prefill w/ prefix reuse | prompt tokens / episode |
 |---|---|---|---|---|---|---|---|
 | `RLM` | 0.71 | 5/8 | 8/8 | 0/8 | ~12.0K | ~12.0K | ~98.8K |
+| `CLM` (no budget) | 0.92 | 6/8 | 8/8 | 0/8 | ~11.9K | ~11.9K | ~134.3K |
 | `RLM @ budget` | 0.00 | 0/8 | 0/8 | 8/8 | ~2.5K | ~2.5K | ~5.0K |
 | `CLM @ budget` | 0.62 | 3/8 | 8/8 | 0/8 | ~2.7K | ~11.2K | ~39.5K |
 
@@ -50,6 +52,14 @@ python docs/docs/tutorials/clm_ledger/clm_vs_rlm.py --model anthropic/claude-hai
 the managed context only (~4 chars/token). *Prompt tokens* are the provider-reported totals, including instructions.
 
 What this shows:
+
+- **Without a budget, CLM does not manage its context at all.** No-budget CLM applied **zero** edits in all 8
+  episodes: with no limit and no pressure, the model just lets the context grow, so its peak (~11.9K) matches RLM's.
+  Its higher accuracy (0.92 vs. 0.71) therefore cannot come from context management. What differs is the prompt
+  and history format: the context-management instructions, `[[CTX_TURN]]` blocks, and size readouts. On 8
+  episodes that gap is also within noise. Those extra instructions and readouts cost ~35% more prompt tokens than
+  RLM. In this setup, CLM's mechanism only switches on once there is a budget to stay under. That matches the
+  paper, where CLM always runs with a budget and an editing reminder near the limit.
 
 - **Under a budget, context management is the difference between finishing and not.** Held to the same
   budget, RLM overflows after about four batches every time: it cannot remove anything from its history. CLM stays

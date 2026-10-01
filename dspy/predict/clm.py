@@ -45,7 +45,7 @@ CONTEXT_INSTRUCTIONS_TEMPLATE = r"""
 Managing your live context:
 - `live_context` is your working memory. Each step (your reasoning and code, then its output) is appended to it as `[[CTX_TURN i role=...]]` blocks. Apart from the inputs and your REPL variables, it is all you will see next step.
 - Before every step, the live context is mirrored to the file at path `CONTEXT_FILE`. Whatever that file holds after your code runs REPLACES your live context. Use it to delete stale outputs, collapse finished work into short notes, or keep a tracker up to date in place.
-- Budget: keep the live context under {context_budget} tokens. Every output ends with a `[context: ~N/{context_budget} tokens]` readout. If you go over budget and do not compact on your very next step, the run ends.
+{budget_rule}
 - Edit with code; never retype text you have already seen:
     s = open(CONTEXT_FILE).read()
     s = re.sub(r"(\[\[CTX_TURN 3 [^\]]*\]\]).*?(?=\n\[\[CTX_TURN|\Z)", r"\1\n[turn 3 done: ids are in column 2]", s, flags=re.S)
@@ -53,6 +53,16 @@ Managing your live context:
 - Keep the header line of any turn you keep; headers are renumbered 1..k after each edit. Text outside a turn survives as a note.
 - A step that edits the context and prints nothing is free: it does not count against your iterations. Do not print the file; it is already in front of you.
 - Compact in batches: one larger edit beats many tiny ones, because everything after an edited spot has to be re-read. Write summaries that keep exactly what you will still need (values, ids, decisions, what remains)."""
+
+_BUDGET_RULE = (
+    "- Budget: keep the live context under {context_budget} tokens. Every output ends with a "
+    "`[context: ~N/{context_budget} tokens]` readout. If you go over budget and do not compact on your very next "
+    "step, the run ends."
+)
+_NO_BUDGET_RULE = (
+    "- Size: every output ends with a `[context: ~N tokens]` readout. There is no hard limit, but a long context "
+    "is slower, costlier, and harder to reason over, so compact it as it grows."
+)
 
 _HEADER_RE = re.compile(r"^\[\[CTX_TURN\s+\d+\s+role=([A-Za-z_]+)\]\][ \t]*$", re.M)
 
@@ -233,7 +243,7 @@ class CLM(RLM):
         self,
         signature: type[Signature] | str,
         max_iters: int = 20,
-        context_budget: int = 8_000,
+        context_budget: int | None = 8_000,
         max_edit_turns: int | None = None,
         max_llm_calls: int = 50,
         max_output_chars: int = 10_000,
@@ -246,7 +256,8 @@ class CLM(RLM):
         Args:
             signature: Defines inputs and outputs, as for RLM.
             max_iters: Maximum task steps. Edit-only steps that print nothing do not count.
-            context_budget: Token budget (~4 chars/token) for the live context. The instructions and
+            context_budget: Token budget (~4 chars/token) for the live context, or None for no limit (the LM
+                still sees size readouts and may edit, but nothing is enforced). The instructions and
                 input metadata sit outside it, like a pinned system prompt.
             max_edit_turns: Cap on free edit-only steps. Defaults to ``max_iters``.
             max_llm_calls, max_output_chars, verbose, tools, sub_lm, interpreter_factory: As for RLM.
@@ -272,9 +283,10 @@ class CLM(RLM):
         """RLM's signatures with the append-only history swapped for the editable live context."""
         action_sig, extract_sig = super()._build_signatures()
         context_field = dspy.InputField(desc="Your live context, which you manage through CONTEXT_FILE")
-        instructions = action_sig.instructions + CONTEXT_INSTRUCTIONS_TEMPLATE.replace(
+        budget_rule = _NO_BUDGET_RULE if self.context_budget is None else _BUDGET_RULE.replace(
             "{context_budget}", str(self.context_budget)
         )
+        instructions = action_sig.instructions + CONTEXT_INSTRUCTIONS_TEMPLATE.replace("{budget_rule}", budget_rule)
         action_sig = (
             action_sig.delete("repl_history")
             .insert(1, "live_context", context_field, type_=ContextFile)
@@ -296,7 +308,7 @@ class CLM(RLM):
 
     def _before_action(self, run: _Run) -> bool:
         """Meter the context the LM is about to see. Returns False when the run must end on overflow."""
-        if run.context.tokens > self.context_budget:
+        if self.context_budget is not None and run.context.tokens > self.context_budget:
             if run.over_budget_warned:
                 run.overflowed = True
                 return False
@@ -346,7 +358,7 @@ class CLM(RLM):
             return "", False
 
         before, after = run.context.tokens, approx_tokens(edited)
-        if after > before and after > self.context_budget:
+        if self.context_budget is not None and after > before and after > self.context_budget:
             run.edits_rejected += 1
             return (
                 f"[CONTEXT_FILE: edit REJECTED - it grew the context ~{before}->{after} tokens, past the "
@@ -359,6 +371,8 @@ class CLM(RLM):
 
     def _readout(self, run: _Run) -> str:
         tokens = run.context.tokens
+        if self.context_budget is None:
+            return f"[context: ~{tokens} tokens]"
         readout = f"[context: ~{tokens}/{self.context_budget} tokens"
         if tokens > self.context_budget:
             readout += " - OVER budget: compact CONTEXT_FILE now"
@@ -435,7 +449,7 @@ class CLM(RLM):
         logger.warning(f"CLM {reason}, using extract to get final output")
         return {
             "variables_info": [variable.format() for variable in variables],
-            "live_context": run.context.drop_oldest_turns(self.context_budget),
+            "live_context": run.context if self.context_budget is None else run.context.drop_oldest_turns(self.context_budget),
         }
 
     def _keep_going(self, run: _Run) -> bool:
