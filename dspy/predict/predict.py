@@ -9,10 +9,9 @@ from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
 from typing_extensions import ParamSpec, Self, TypeVar
 
-from dspy.adapters.chat_adapter import ChatAdapter
 from dspy.adapters.decision import resolve_adapter
 from dspy.adapters.decision_state import DecisionState
-from dspy.adapters.utils import annotation_allows_none
+from dspy.adapters.utils import _get_adapter, annotation_allows_none
 from dspy.clients.base_lm import BaseLM
 from dspy.dsp.utils.settings import settings
 from dspy.predict.parameter import Parameter
@@ -292,7 +291,7 @@ class Predict(Module, Parameter, Generic[P, S]):
     def forward(self, *args: P.args, **kwargs: P.kwargs) -> S:
         lm, config, signature, demos, inputs = self._forward_preprocess(**kwargs)
 
-        adapter = resolve_adapter(lm, settings.adapter or ChatAdapter(), signature, self.fields, self.signature)
+        adapter = resolve_adapter(lm, _get_adapter(), signature, self.fields, self.signature)
 
         if self._should_stream():
             with settings.context(caller_predict=self):
@@ -306,7 +305,7 @@ class Predict(Module, Parameter, Generic[P, S]):
     async def aforward(self, *args: P.args, **kwargs: P.kwargs) -> S:
         lm, config, signature, demos, inputs = self._forward_preprocess(**kwargs)
 
-        adapter = resolve_adapter(lm, settings.adapter or ChatAdapter(), signature, self.fields, self.signature)
+        adapter = resolve_adapter(lm, _get_adapter(), signature, self.fields, self.signature)
         if self._should_stream():
             with settings.context(caller_predict=self):
                 completions = await adapter.acall(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=inputs)
