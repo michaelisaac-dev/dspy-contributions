@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Generic, cast, overload
+from typing import Any, Generic, overload
 
 from pydantic.fields import FieldInfo
 from typing_extensions import ParamSpec, TypeVar
@@ -8,10 +8,6 @@ import dspy
 from dspy.primitives.module import Module
 from dspy.signatures.signature import Signature, ensure_signature
 
-if TYPE_CHECKING:
-    from dspy.predict.predict import Predict
-
-# Defaults keep a bare `ChainOfThought` annotation meaning an untyped module (PEP 696).
 P = ParamSpec("P", default=...)
 S = TypeVar("S", bound=Signature, default=Signature, covariant=True)
 
@@ -43,8 +39,6 @@ class ChainOfThought(Module, Generic[P, S]):
         >>> print(result.answer)
     """
 
-    # Typed like Predict: calls take the signature's inputs and return a prediction of it. The added
-    # `reasoning` field is not part of the signature, so type checkers see it as Any.
     @overload
     def __init__(
         self,
@@ -65,10 +59,10 @@ class ChainOfThought(Module, Generic[P, S]):
 
     def __init__(
         self,
-        signature: str | type[Signature] | Signature,
+        signature: str | type[Signature],
         rationale_field: FieldInfo | None = None,
         rationale_field_type: type | None = None,
-        **config: Any,
+        **config: dict[str, Any],
     ):
         super().__init__()
         signature = ensure_signature(signature)
@@ -80,8 +74,7 @@ class ChainOfThought(Module, Generic[P, S]):
         extended_signature = signature.prepend(name="reasoning", field=rationale_field, type_=rationale_field_type)
         if use_default:
             extended_signature = extended_signature.with_updated_fields("reasoning", __dspy_reasoning_fallback="plan")
-        # The extended signature has the same inputs and adds `reasoning` to the outputs.
-        self.predict = cast("Predict[P, S]", dspy.Predict(extended_signature, **config))
+        self.predict = dspy.Predict(extended_signature, **config)
 
     def forward(self, *args: P.args, **kwargs: P.kwargs) -> S:
         return self.predict(*args, **kwargs)

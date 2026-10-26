@@ -1,7 +1,7 @@
 import logging
 import sys
 from collections.abc import Awaitable
-from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TextIO, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TextIO, TypeVar
 
 from dspy.dsp.utils.settings import settings
 from dspy.predict.parallel import Parallel
@@ -31,8 +31,7 @@ class _AForward(Protocol[P, R_co]):
 class ProgramMeta(type):
     """Metaclass ensuring every ``dspy.Module`` instance is properly initialised."""
 
-    # Hidden from type checkers so that constructing a module is checked against its `__init__`, which is
-    # how generic modules such as `Predict` infer their type parameters.
+    # Hidden from type checkers so that constructing a module is checked against its `__init__`.
     if not TYPE_CHECKING:
 
         def __call__(cls, *args, **kwargs):
@@ -108,8 +107,7 @@ class Module(BaseModule, metaclass=ProgramMeta):
             self.callbacks = []
 
     if TYPE_CHECKING:
-        # Subclasses define these. Calling a module runs `forward` (and `acall` runs `aforward`), so type
-        # checkers give the call the parameters and return type of the subclass's method.
+
         def forward(self, *args: Any, **kwargs: Any) -> Any: ...
 
         async def aforward(self, *args: Any, **kwargs: Any) -> Any: ...
@@ -118,17 +116,16 @@ class Module(BaseModule, metaclass=ProgramMeta):
     def __call__(self: _Forward[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
         from dspy.dsp.utils.settings import thread_local_overrides
 
-        module = cast(Module, self)
         caller_modules = settings.caller_modules or []
         caller_modules = list(caller_modules)
-        caller_modules.append(module)
+        caller_modules.append(self)
 
         with settings.context(caller_modules=caller_modules):
             if settings.track_usage and thread_local_overrides.get().get("usage_tracker") is None:
                 with track_usage() as usage_tracker:
                     output = self.forward(*args, **kwargs)
                 tokens = usage_tracker.get_total_tokens()
-                module._set_lm_usage(tokens, output)
+                self._set_lm_usage(tokens, output)
 
                 return output
 
@@ -138,17 +135,16 @@ class Module(BaseModule, metaclass=ProgramMeta):
     async def acall(self: _AForward[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
         from dspy.dsp.utils.settings import thread_local_overrides
 
-        module = cast(Module, self)
         caller_modules = settings.caller_modules or []
         caller_modules = list(caller_modules)
-        caller_modules.append(module)
+        caller_modules.append(self)
 
         with settings.context(caller_modules=caller_modules):
             if settings.track_usage and thread_local_overrides.get().get("usage_tracker") is None:
                 with track_usage() as usage_tracker:
                     output = await self.aforward(*args, **kwargs)
                     tokens = usage_tracker.get_total_tokens()
-                    module._set_lm_usage(tokens, output)
+                    self._set_lm_usage(tokens, output)
 
                     return output
 

@@ -1803,8 +1803,6 @@ def test_custom_signature_types(caplog, enable_type_warnings):
 
 
 def test_typed_predict_returns_prediction_of_outputs():
-    # Type checkers see the result as a Report instance whose attributes have the annotated types.
-    # At runtime, it is a Prediction holding just the outputs, with values of those types.
     class City(BaseModel):
         name: str
         population: int

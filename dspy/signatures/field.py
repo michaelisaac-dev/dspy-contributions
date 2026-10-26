@@ -1,5 +1,5 @@
 import warnings
-from typing import Any, Literal
+from typing import Literal
 
 import pydantic
 
@@ -77,15 +77,13 @@ def _warn_deprecated_field_args(**kwargs):
             warnings.warn(message, DeprecationWarning, stacklevel=3)
 
 
-# `init` is never passed by callers; it is for type checkers, which treat InputField and OutputField as
-# PEP 681 field specifiers (see SignatureMeta). Inputs become parameters of a signature's synthesized
-# `__init__`, which typed modules reuse as their call signature; outputs do not.
-def InputField(*, init: Literal[True] = True, **kwargs: Any) -> Any:  # noqa: N802
+# `init` is only read by type checkers: inputs are parameters of a signature's `__init__`, outputs aren't.
+def InputField(*, init: Literal[True] = True, **kwargs): # noqa: N802
     _warn_deprecated_field_args(**kwargs)
     return pydantic.Field(**move_kwargs(**kwargs, __dspy_field_type="input"))
 
 
-def OutputField(*, init: Literal[False] = False, **kwargs: Any) -> Any:  # noqa: N802
+def OutputField(*, init: Literal[False] = False, **kwargs): # noqa: N802
     _warn_deprecated_field_args(**kwargs)
     return pydantic.Field(**move_kwargs(**kwargs, __dspy_field_type="output"))
 

@@ -3,11 +3,11 @@ import logging
 import random
 import types
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Generic, Literal, Union, cast, get_args, get_origin, overload
+from typing import TYPE_CHECKING, Any, Generic, Literal, Union, get_args, get_origin, overload
 
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
-from typing_extensions import ParamSpec, Self, TypeVar
+from typing_extensions import ParamSpec, TypeVar
 
 from dspy.adapters.decision import resolve_adapter
 from dspy.adapters.decision_state import DecisionState
@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 UNSAFE_LM_STATE_KEYS = {"api_base", "base_url", "model_list"}
 
-# Defaults keep a bare `Predict` annotation meaning an untyped module (PEP 696).
 P = ParamSpec("P", default=...)
 S = TypeVar("S", bound=Signature, default=Signature, covariant=True)
 
@@ -63,9 +62,6 @@ class Predict(Module, Parameter, Generic[P, S]):
                 predict(q="What is 1 + 52?", config={"rollout_id": 2, "temperature": 1.0})
     """
 
-    # A signature class types the module: calls take its input fields and return a prediction of it
-    # (`Predict[(*, question: str), QA]`). A string or a `type[Signature]` gives an untyped module, as does
-    # `Signature("question -> answer")`, which type checkers see as a Signature instance.
     @overload
     def __init__(
         self, signature: Callable[P, S], callbacks: list[BaseCallback] | None = None, **config: Any
@@ -79,9 +75,7 @@ class Predict(Module, Parameter, Generic[P, S]):
         **config: Any,
     ) -> None: ...
 
-    def __init__(
-        self, signature: str | type[Signature] | Signature, callbacks: list[BaseCallback] | None = None, **config
-    ):
+    def __init__(self, signature: str | type[Signature], callbacks: list[BaseCallback] | None = None, **config):
         super().__init__(callbacks=callbacks)
         self.stage = random.randbytes(8).hex()
         self.signature = ensure_signature(signature)
@@ -119,7 +113,7 @@ class Predict(Module, Parameter, Generic[P, S]):
         state["lm"] = self.lm.dump_state() if self.lm else None
         return state
 
-    def load_state(self, state: dict, *, allow_unsafe_lm_state: bool = False) -> Self:
+    def load_state(self, state: dict, *, allow_unsafe_lm_state: bool = False) -> "Predict":
         """Load the saved state of a `Predict` object.
 
         Args:
@@ -161,8 +155,7 @@ class Predict(Module, Parameter, Generic[P, S]):
             f"`predict({input_fields[0]}=input_value, ...)`."
         )
 
-    # Hidden from type checkers, which type calls from `forward` through Module.__call__. PyCharm (2025.3) can't
-    # follow a ParamSpec captured from a signature class, and would warn on every call typed here.
+    # Hidden from type checkers, which type calls from `forward` (PyCharm can't follow them typed here).
     if not TYPE_CHECKING:
 
         def __call__(self, *args, **kwargs):
@@ -270,15 +263,14 @@ class Predict(Module, Parameter, Generic[P, S]):
             )
         return lm, config, signature, demos, kwargs
 
-    def _forward_postprocess(self, completions, signature, **kwargs) -> S:
+    def _forward_postprocess(self, completions, signature, **kwargs):
         pred = Prediction.from_completions(completions, signature=signature)
         if kwargs.pop("_trace", True) and settings.trace is not None and settings.max_trace_size > 0:
             trace = settings.trace
             if len(trace) >= settings.max_trace_size:
                 trace.pop(0)
             trace.append((self, {**kwargs}, pred))
-        # Type checkers see a prediction made with signature S as an instance of S (see Signature).
-        return cast(S, pred)
+        return pred
 
     def _should_stream(self):
         stream_listeners = settings.stream_listeners or []
@@ -289,31 +281,31 @@ class Predict(Module, Parameter, Generic[P, S]):
         return should_stream
 
     def forward(self, *args: P.args, **kwargs: P.kwargs) -> S:
-        lm, config, signature, demos, inputs = self._forward_preprocess(**kwargs)
+        lm, config, signature, demos, kwargs = self._forward_preprocess(**kwargs)
 
         adapter = resolve_adapter(lm, _get_adapter(), signature, self.fields, self.signature)
 
         if self._should_stream():
             with settings.context(caller_predict=self):
-                completions = adapter(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=inputs)
+                completions = adapter(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
         else:
             with settings.context(send_stream=None):
-                completions = adapter(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=inputs)
+                completions = adapter(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
 
-        return self._forward_postprocess(completions, signature, **inputs)
+        return self._forward_postprocess(completions, signature, **kwargs)
 
     async def aforward(self, *args: P.args, **kwargs: P.kwargs) -> S:
-        lm, config, signature, demos, inputs = self._forward_preprocess(**kwargs)
+        lm, config, signature, demos, kwargs = self._forward_preprocess(**kwargs)
 
         adapter = resolve_adapter(lm, _get_adapter(), signature, self.fields, self.signature)
         if self._should_stream():
             with settings.context(caller_predict=self):
-                completions = await adapter.acall(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=inputs)
+                completions = await adapter.acall(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
         else:
             with settings.context(send_stream=None):
-                completions = await adapter.acall(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=inputs)
+                completions = await adapter.acall(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
 
-        return self._forward_postprocess(completions, signature, **inputs)
+        return self._forward_postprocess(completions, signature, **kwargs)
 
     def get_criteria(self, field):
         """Return copied effective criteria for an experimental decision output."""

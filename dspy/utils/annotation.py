@@ -1,19 +1,22 @@
 import inspect
 import re
 import types
-from typing import Callable, TypeVar, overload
+from typing import Callable, ParamSpec, TypeVar, overload
 
-# The decorated API is returned unchanged, so a decorated class is still a class (with its generics) for type checkers.
-T = TypeVar("T")
-
-@overload
-def experimental(f: None = None, version: str | None = None) -> Callable[[T], T]: ...
+P = ParamSpec("P")
+R = TypeVar("R")
 
 @overload
-def experimental(f: T, version: str | None = None) -> T: ...
+def experimental(f: Callable[P, R], version: str | None = None) -> Callable[P, R]: ...
+
+@overload
+def experimental(f: None = None, version: str | None = None) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 
 
-def experimental(f=None, version: str | None = None):
+def experimental(
+    f: Callable[P, R] | None = None,
+    version: str | None = None,
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator / decorator creator for marking APIs experimental in the docstring.
 
     Args:
@@ -28,12 +31,12 @@ def experimental(f=None, version: str | None = None):
     if f:
         return _experimental(f, version)
     else:
-        def decorator(f: T) -> T:
+        def decorator(f: Callable[P, R]) -> Callable[P, R]:
             return _experimental(f, version)
         return decorator
 
 
-def _experimental(api: T, version: str | None = None) -> T:
+def _experimental(api: Callable[P, R], version: str | None = None) -> Callable[P, R]:
     """Add experimental notice to the API's docstring."""
     if inspect.isclass(api):
         api_type = "class"

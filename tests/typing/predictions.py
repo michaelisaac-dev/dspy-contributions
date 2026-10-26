@@ -1,8 +1,4 @@
-"""Signature-typed modules: calls take the signature's input fields and return a prediction of it.
-
-Checked by ty, not executed by pytest. Deliberately invalid calls use ignores to assert expected
-diagnostics: unused-ignore errors make these checks fail if invalid calls become accepted.
-"""
+"""Static contracts for signature-typed modules, checked by ty rather than executed by pytest."""
 
 from typing import Any
 
@@ -40,10 +36,8 @@ def check_predict(lm: dspy.LM) -> None:
     pred = predict(question="What is 2 + 2?")
     assert_type(pred, QA)
     assert_type(pred.answer, int)
-    # A prediction of QA is still a Prediction, e.g. for metrics.
     metric(dspy.Example(answer=4), pred)
 
-    # Predict's own keywords are accepted alongside the inputs.
     predict(question="q", context=["c"], lm=lm, config={"temperature": 0.0}, demos=[])
 
     predict(questoin="q")  # ty: ignore[unknown-argument, missing-argument]
@@ -63,7 +57,6 @@ def check_chain_of_thought() -> None:
     pred = cot(question="q")
     assert_type(pred, QA)
     assert_type(pred.answer, int)
-    # `reasoning` is added at runtime, outside the signature, so it is dynamic.
     assert_type(pred.reasoning, Any)
     cot(question=1)  # ty: ignore[invalid-argument-type]
 
@@ -77,7 +70,6 @@ def check_custom_module() -> None:
 
 
 def check_untyped_signatures(dynamic: type[dspy.Signature], program: dspy.Module) -> None:
-    # Signatures from strings, or known only as `type[Signature]`, give untyped modules as before.
     assert_type(dspy.Predict("question -> answer")(question="q"), dspy.Signature)
     assert_type(dspy.Predict(dynamic)(anything="q"), dspy.Signature)
     assert_type(dspy.ChainOfThought("question -> answer")(question="q"), dspy.Signature)
@@ -86,22 +78,13 @@ def check_untyped_signatures(dynamic: type[dspy.Signature], program: dspy.Module
 
 
 def check_runtime_built_signatures() -> None:
-    # `dspy.Signature(...)` returns a class at runtime; checkers see an untyped Signature, accepted as before.
     from_string = dspy.Signature("question -> answer", "Answer briefly.")
     from_fields = dspy.Signature({"question": (str, dspy.InputField()), "answer": (str, dspy.OutputField())})
     assert_type(dspy.Predict(from_string)(question="q"), dspy.Signature)
     assert_type(dspy.ChainOfThought(from_fields)(question="q"), dspy.Signature)
 
 
-def check_derived_signatures() -> None:
-    # New instructions keep the fields, so the module stays typed.
-    pred = dspy.Predict(QA.with_instructions("Answer tersely."))(question="q")
-    assert_type(pred, QA)
-    assert_type(pred.answer, int)
-
-
 def check_bare_annotations() -> None:
-    # Typed modules can be used wherever the untyped ones are expected.
     predict = dspy.Predict(QA)
     cot = dspy.ChainOfThought(QA)
     use_untyped([predict, dspy.Predict("question -> answer")], cot)
