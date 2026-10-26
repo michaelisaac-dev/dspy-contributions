@@ -638,3 +638,18 @@ def test_predict_cloudpickle_roundtrip():
     loaded = pickle.loads(data)
 
     assert list(loaded.signature.fields.keys()) == ["question", "answer"]
+
+
+def test_typing_only_declarations_leave_runtime_signatures_unchanged():
+    # Type checkers see signatures as Predictions with init-only `lm`, `config` and `demos` keywords.
+    # At runtime they stay pydantic models with just their declared fields.
+    class QA(Signature):
+        question: str = InputField()
+        answer: int = OutputField()
+
+    assert issubclass(QA, pydantic.BaseModel)
+    assert not issubclass(QA, dspy.Prediction)
+    assert list(QA.model_fields) == ["question", "answer"]
+    # `init` exists only for type checkers and is never passed to pydantic.
+    assert all(field.init is None for field in QA.model_fields.values())
+    assert list(Signature("question -> answer").model_fields) == ["question", "answer"]

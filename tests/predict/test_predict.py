@@ -1780,3 +1780,44 @@ def test_custom_signature_types(caplog, enable_type_warnings):
         assert "Type mismatch for field 'query': expected Query" in caplog.text
     else:
         assert "Type mismatch" not in caplog.text
+
+
+def test_typed_predict_returns_prediction_of_outputs():
+    # Type checkers see the result as a Report instance whose attributes have the annotated types.
+    # At runtime, it is a Prediction holding just the outputs, with values of those types.
+    class City(BaseModel):
+        name: str
+        population: int
+
+    class Report(Signature):
+        question: str = dspy.InputField()
+        answer: str = dspy.OutputField()
+        count: int = dspy.OutputField()
+        score: float = dspy.OutputField()
+        verified: bool = dspy.OutputField()
+        tags: list[str] = dspy.OutputField()
+        city: City = dspy.OutputField()
+
+    lm = DummyLM(
+        [
+            {
+                "answer": "Paris",
+                "count": "3",
+                "score": "0.5",
+                "verified": "true",
+                "tags": '["capital", "europe"]',
+                "city": '{"name": "Paris", "population": 2100000}',
+            }
+        ]
+    )
+    pred = Predict(Report)(question="Where is the Louvre?", lm=lm, config={"temperature": 0.0})
+
+    assert type(pred) is dspy.Prediction
+    assert list(pred.keys()) == ["answer", "count", "score", "verified", "tags", "city"]
+    assert isinstance(pred.answer, str)
+    assert isinstance(pred.count, int)
+    assert isinstance(pred.score, float)
+    assert isinstance(pred.verified, bool)
+    assert isinstance(pred.tags, list) and all(isinstance(tag, str) for tag in pred.tags)
+    assert isinstance(pred.city, City)
+    assert pred.city.population == 2100000

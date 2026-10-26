@@ -1,15 +1,24 @@
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Generic, cast, overload
 
 from pydantic.fields import FieldInfo
+from typing_extensions import ParamSpec, TypeVar
 
 import dspy
 from dspy.primitives.module import Module
 from dspy.signatures.signature import Signature, ensure_signature
 
+if TYPE_CHECKING:
+    from dspy.predict.predict import Predict
+
+# Defaults keep a bare `ChainOfThought` annotation meaning an untyped module (PEP 696).
+P = ParamSpec("P", default=...)
+S = TypeVar("S", bound=Signature, default=Signature, covariant=True)
+
 # NOTE: This restores the legacy rationale_field behavior after PR #8822.
 
 
-class ChainOfThought(Module):
+class ChainOfThought(Module, Generic[P, S]):
     """A module that reasons before producing the output.
 
     Uses native reasoning when supported, otherwise requests a short plan before
@@ -34,12 +43,32 @@ class ChainOfThought(Module):
         >>> print(result.answer)
     """
 
+    # Typed like Predict: calls take the signature's inputs and return a prediction of it. The added
+    # `reasoning` field is not part of the signature, so type checkers see it as Any.
+    @overload
     def __init__(
         self,
-        signature: str | type[Signature],
+        signature: Callable[P, S],
         rationale_field: FieldInfo | None = None,
         rationale_field_type: type | None = None,
-        **config: dict[str, Any],
+        **config: Any,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self: "ChainOfThought[..., Signature]",
+        signature: str | type[Signature] | Signature,
+        rationale_field: FieldInfo | None = None,
+        rationale_field_type: type | None = None,
+        **config: Any,
+    ) -> None: ...
+
+    def __init__(
+        self,
+        signature: str | type[Signature] | Signature,
+        rationale_field: FieldInfo | None = None,
+        rationale_field_type: type | None = None,
+        **config: Any,
     ):
         super().__init__()
         signature = ensure_signature(signature)
@@ -51,10 +80,11 @@ class ChainOfThought(Module):
         extended_signature = signature.prepend(name="reasoning", field=rationale_field, type_=rationale_field_type)
         if use_default:
             extended_signature = extended_signature.with_updated_fields("reasoning", __dspy_reasoning_fallback="plan")
-        self.predict = dspy.Predict(extended_signature, **config)
+        # The extended signature has the same inputs and adds `reasoning` to the outputs.
+        self.predict = cast("Predict[P, S]", dspy.Predict(extended_signature, **config))
 
-    def forward(self, **kwargs):
-        return self.predict(**kwargs)
+    def forward(self, *args: P.args, **kwargs: P.kwargs) -> S:
+        return self.predict(*args, **kwargs)
 
-    async def aforward(self, **kwargs):
-        return await self.predict.acall(**kwargs)
+    async def aforward(self, *args: P.args, **kwargs: P.kwargs) -> S:
+        return await self.predict.acall(*args, **kwargs)

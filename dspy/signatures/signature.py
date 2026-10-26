@@ -23,13 +23,20 @@ import sys
 import types
 import typing
 from copy import deepcopy
-from typing import Any, Iterator
+from dataclasses import InitVar
+from typing import TYPE_CHECKING, Any, Iterator, cast
 
 from pydantic import BaseModel, Field, create_model
 from pydantic.fields import FieldInfo
+from typing_extensions import Self, dataclass_transform
 
 from dspy.signatures.field import InputField, OutputField
 from dspy.utils.constants import IS_TYPE_UNDEFINED
+
+if TYPE_CHECKING:
+    from dspy.clients.base_lm import BaseLM
+    from dspy.primitives.example import Example
+    from dspy.primitives.prediction import Prediction
 
 
 def _default_instructions(cls) -> str:
@@ -38,17 +45,24 @@ def _default_instructions(cls) -> str:
     return f"Given the fields {inputs_}, produce the fields {outputs_}."
 
 
+# Type checkers synthesize an `__init__` from a signature's input fields (PEP 681). Typed modules such as
+# `Predict` capture it as their call signature, so `Predict(QA)(question=...)` is checked against QA's inputs.
+@dataclass_transform(kw_only_default=True, field_specifiers=(InputField, OutputField))
 class SignatureMeta(type(BaseModel)):
-    def __call__(cls, *args, **kwargs):
-        if cls is Signature:
-            # We don't create an actual Signature instance, instead, we create a new Signature class.
-            custom_types = kwargs.pop("custom_types", None)
+    # Hidden from type checkers: some (ty) would otherwise take it as every signature class's constructor,
+    # in place of the `__init__` synthesized from its fields.
+    if not TYPE_CHECKING:
 
-            if custom_types is None and args and isinstance(args[0], str):
-                custom_types = cls._detect_custom_types_from_caller(args[0])
+        def __call__(cls, *args, **kwargs):
+            if cls is Signature:
+                # We don't create an actual Signature instance, instead, we create a new Signature class.
+                custom_types = kwargs.pop("custom_types", None)
 
-            return make_signature(*args, custom_types=custom_types, **kwargs)
-        return super().__call__(*args, **kwargs)
+                if custom_types is None and args and isinstance(args[0], str):
+                    custom_types = cls._detect_custom_types_from_caller(args[0])
+
+                return make_signature(*args, custom_types=custom_types, **kwargs)
+            return super().__call__(*args, **kwargs)
 
     @staticmethod
     def _detect_custom_types_from_caller(signature_str):
@@ -268,14 +282,34 @@ class SignatureMeta(type(BaseModel)):
         return f"{cls.__name__}({cls.signature}\n    instructions={cls.instructions!r}\n    {field_repr}\n)"
 
 
-class Signature(BaseModel, metaclass=SignatureMeta):
+if TYPE_CHECKING:
+    # Type checkers see an instance of a signature as a prediction made with it: its fields are attributes,
+    # and everything else comes from Prediction. At runtime, signatures are pydantic models that are never
+    # instantiated, and modules return Prediction objects.
+    _SignatureBase = Prediction
+else:
+    _SignatureBase = BaseModel
+
+
+class Signature(_SignatureBase, metaclass=SignatureMeta):
     """"""
 
     # Note: Don't put a docstring here, as it will become the default instructions
     # for any signature that doesn't define its own instructions.
 
+    if TYPE_CHECKING:
+        # Keywords Predict accepts besides the input fields. As InitVars they are not attributes of predictions.
+        lm: InitVar[BaseLM | None] = InputField(default=None)
+        config: InitVar[dict[str, Any] | None] = InputField(default=None)
+        demos: InitVar[list[Example] | None] = InputField(default=None)
+
+        # Subclasses get an `__init__` synthesized from their fields. A signature known only as
+        # `type[Signature]`, such as one built from a string, accepts any inputs. This also lets
+        # `Signature("question -> answer")` type-check, though checkers see its result as an instance.
+        def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
     @classmethod
-    def with_instructions(cls, instructions: str) -> type["Signature"]:
+    def with_instructions(cls, instructions: str) -> type[Self]:
         """Return a new Signature class with identical fields and new instructions.
 
         This method does not mutate `cls`. It constructs a fresh Signature
@@ -301,10 +335,11 @@ class Signature(BaseModel, metaclass=SignatureMeta):
             assert NewSig.instructions == "Translate to French."
             ```
         """
-        return Signature(cls.fields, instructions)
+        # The new class has the same fields, so type checkers can treat it as `cls`.
+        return cast(type[Self], Signature(cls.fields, instructions))
 
     @classmethod
-    def append_instructions(cls, instructions: str) -> type["Signature"]:
+    def append_instructions(cls, instructions: str) -> type[Self]:
         """Return a new Signature class with identical fields and `instructions` appended to the existing instructions.
 
         This method does not mutate `cls`. It constructs a fresh Signature 
@@ -330,7 +365,7 @@ class Signature(BaseModel, metaclass=SignatureMeta):
             assert "Pass additional context." in NewSig.instructions
             ```
         """
-        return Signature(cls.fields, f"{cls.instructions}\n\n{instructions}")
+        return cast(type[Self], Signature(cls.fields, f"{cls.instructions}\n\n{instructions}"))
 
     @classmethod
     def with_updated_fields(cls, name: str, type_: type | None = None, **kwargs: dict[str, Any]) -> type["Signature"]:

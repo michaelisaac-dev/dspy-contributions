@@ -200,3 +200,9 @@ async def test_parse_failure_preserves_predictor_signature(adapter, collision, a
     assert error.parsed_result == ({"reasoning": "Working", "plan": "Task plan"} if collision else {"reasoning": "Working"})
     assert error.lm_response == lm.history[-1]["outputs"][0]
     assert error.adapter_name == type(adapter).__name__
+
+
+def test_positional_arguments():
+    program = ChainOfThought("question -> answer")
+    with pytest.raises(ValueError, match=r"Positional arguments are not allowed when calling `dspy\.Predict`"):
+        program("What is the capital of France?")
